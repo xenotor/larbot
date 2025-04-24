@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-dotenv
+pyav
+aiortc
+opencv-python
+pipecat-ai[silero, cartesia, deepgram]
+pipecat-ai-small-webrtc-prebuilt

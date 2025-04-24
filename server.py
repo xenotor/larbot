@@ -1,0 +1,103 @@
+"Pipecat Bot Runner for WebRTC connections"
+import argparse
+import asyncio
+import sys
+from contextlib import asynccontextmanager
+from typing import Dict
+
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, FastAPI
+from fastapi.responses import RedirectResponse
+from loguru import logger
+from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
+
+from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection
+
+from larbot import run_bot
+
+# Load environment variables
+load_dotenv(override=True)
+
+app = FastAPI()
+
+# Store connections by pc_id
+pcs_map: Dict[str, SmallWebRTCConnection] = {}
+
+ice_servers = ["stun:stun.l.google.com:19302"]
+
+# Mount the frontend at /
+app.mount("/client", SmallWebRTCPrebuiltUI)
+
+# Redirect root URL to /client
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/client/")
+
+# start bot as process
+@app.post("/api/offer")
+async def offer(request: dict, background_tasks: BackgroundTasks):
+    if not run_bot:
+        raise RuntimeError("No bot file has been loaded")
+
+    pc_id = request.get("pc_id")
+
+    if pc_id and pc_id in pcs_map:
+        pipecat_connection = pcs_map[pc_id]
+        logger.info(f"Reusing existing connection for pc_id: {pc_id}")
+        await pipecat_connection.renegotiate(
+            sdp=request["sdp"], type=request["type"], restart_pc=request.get("restart_pc", False)
+        )
+
+    else:
+        pipecat_connection = SmallWebRTCConnection(ice_servers)
+        await pipecat_connection.initialize(sdp=request["sdp"], type=request["type"])
+
+        @pipecat_connection.event_handler("closed")
+        async def handle_disconnected(webrtc_connection: SmallWebRTCConnection):
+            logger.info(f"Discarding pc_id: {webrtc_connection.pc_id}")
+            pcs_map.pop(webrtc_connection.pc_id, None)
+
+        background_tasks.add_task(run_bot, pipecat_connection)
+
+    answer = pipecat_connection.get_answer()
+    # Updating the peer connection inside the map
+    pcs_map[answer["pc_id"]] = pipecat_connection
+    # Send the answer back to the client
+    return answer
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield  # Run app
+    coros = [pc.close() for pc in pcs_map.values()]
+    await asyncio.gather(*coros)
+    pcs_map.clear()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pipecat Bot Runner")
+    parser.add_argument("--host", default="localhost", help="(default: localhost)")
+    parser.add_argument("--port", type=int, default=7860, help="(default: 7860)")
+    parser.add_argument("--verbose", "-v", action="count", default=0)
+    args = parser.parse_args()
+
+    logger.remove(0)
+    if args.verbose:
+        logger.add(sys.stderr, level="TRACE")
+    else:
+        logger.add(sys.stderr, level="DEBUG")
+
+    try:
+
+        uvicorn.run(app, host=args.host, port=args.port)
+
+    except Exception as e:
+        logger.error(f"Error loading bot file: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
