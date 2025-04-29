@@ -47,6 +47,25 @@ class MetricsLogger(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class OctopusDetector(FrameProcessor):
+    def __init__(self, messages):
+        super().__init__(name="octopus_detector")
+        self.messages = messages
+        self.original_prompt = messages[0]["content"]
+        self.rhyme_prompt = "You are a helpful LLM in a WebRTC call. Your goal is to demonstrate your capabilities in a succinct way. Your output will be converted to audio so don't include special characters in your answers. Respond ONLY in rhymes while still being helpful and addressing the user's request."
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        if direction == FrameDirection.DOWNSTREAM and hasattr(frame, "text") and "octopus" in frame.text.lower():
+            logger.info("Octopus detected! Switching to rhyme mode")
+            self.messages[0]["content"] = self.rhyme_prompt
+        elif direction == FrameDirection.DOWNSTREAM and hasattr(frame, "text") and "fish" in frame.text.lower():
+            self.messages[0]["content"] = self.original_prompt
+        
+        await self.push_frame(frame, direction)
+
+
 async def run_bot(webrtc_connection: SmallWebRTCConnection):
     logger.info(f"Starting bot")
 
@@ -82,16 +101,19 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection):
     context = OpenAILLMContext(messages)
     context_aggregator = llm.create_context_aggregator(context)
 
+    octopus_detector = OctopusDetector(messages)
+    
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
+            octopus_detector,
             context_aggregator.user(),
             llm,
             tts,
             ml,
             transport.output(),
-            context_aggregator.assistant(),
+            context_aggregator.assistant()
         ]
     )
 
@@ -107,7 +129,7 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection):
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
         # Kick off the conversation.
-        messages.append({"role": "system", "content": "Please introduce yourself to the user."})
+        messages.append({"role": "system", "content": "Please introduce yourself to the user. Inform the user that if they say octopus, you will respond in rhymes. If they say fish, you will respond normally."})
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
